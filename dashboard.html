@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Metatronik Sales — Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</head>
+<body>
+<main>
+  <div id="pageMsg"></div>
+
+  <!-- Alerts box (owner and manager) -->
+  <div class="card alerts hidden" id="alertsCard">
+    <h2>Alerts</h2>
+    <div id="alerts"></div>
+  </div>
+
+  <!-- Day picker and search -->
+  <div class="card">
+    <div class="row">
+      <div class="grow">
+        <h1 id="dayTitle">Dashboard</h1>
+        <div class="muted small" id="daySub"></div>
+      </div>
+      <div>
+        <label for="dayPick">Show day</label>
+        <input type="date" id="dayPick">
+      </div>
+      <div>
+        <button class="secondary" id="prevDay" title="Day before">◀</button>
+        <button class="secondary" id="nextDay" title="Day after">▶</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- KPIs -->
+  <div class="kpis" id="kpis"></div>
+
+  <!-- Orders table -->
+  <div class="card">
+    <div class="row" style="margin-bottom:12px">
+      <h2 class="grow" id="tableTitle" style="margin:0">Orders</h2>
+      <form id="searchForm" class="row" style="gap:6px">
+        <input id="searchBox" placeholder="Search order ID (any date)" style="width:220px">
+        <button type="submit" class="secondary">Search</button>
+        <button type="button" class="secondary hidden" id="clearSearch">Clear</button>
+      </form>
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr id="ordersHead"></tr></thead>
+      <tbody id="ordersBody"></tbody>
+    </table></div>
+  </div>
+
+  <!-- Chart -->
+  <div class="card">
+    <h2 id="chartTitle">Total sales per day</h2>
+    <div class="chart-box"><canvas id="salesChart"></canvas></div>
+    <p class="small muted" style="margin:8px 0 0">Confirmed orders only.</p>
+  </div>
+
+  <!-- AI brief (owner and manager) -->
+  <div class="card hidden" id="aiCard">
+    <h2>AI daily brief</h2>
+    <p class="small muted">The system writes the question for you. You run it in Claude yourself, check the answer, then save it. No AI key is stored here.</p>
+    <button id="makeBrief">Make AI brief for this day</button>
+    <div id="briefArea" class="hidden" style="margin-top:12px">
+      <div class="field">
+        <label>Step 1 — Copy this question</label>
+        <textarea id="briefPrompt" readonly></textarea>
+      </div>
+      <div class="row" style="margin-bottom:12px">
+        <button class="secondary" id="copyPrompt">Copy question</button>
+        <a class="btn secondary" href="https://claude.ai/new" target="_blank" rel="noopener">Open Claude</a>
+      </div>
+      <div class="field">
+        <label for="briefAnswer">Step 2 — Paste Claude's answer here</label>
+        <textarea id="briefAnswer"></textarea>
+      </div>
+      <label class="check"><input type="checkbox" id="briefChecked"> I have checked this</label>
+      <div style="margin-top:10px"><button id="saveBrief" disabled>Save brief</button></div>
+      <div id="briefMsg"></div>
+    </div>
+    <div id="savedBriefs" style="margin-top:12px"></div>
+  </div>
+</main>
+
+<!-- Owner: edit order -->
+<div class="modal-bg hidden" id="editModal">
+  <form class="modal" id="editForm">
+    <h2>Edit order <span id="editId"></span></h2>
+    <div class="field"><label for="editDate">Order date</label><input type="date" id="editDate" required></div>
+    <div class="field"><label for="editCustomer">Customer</label><input id="editCustomer"></div>
+    <div class="field"><label for="editAmount">Amount (RM)</label><input type="number" id="editAmount" min="0" step="0.01" required></div>
+    <div class="field"><label for="editStatus">Status</label>
+      <select id="editStatus"><option>Confirmed</option><option>Cancelled</option></select></div>
+    <div id="editMsg"></div>
+    <div class="row"><button type="submit">Save</button><button type="button" class="secondary" id="editCancel">Cancel</button></div>
+  </form>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let ME, SETTINGS, DAY, DAY_ORDERS = [], chart, editing = null, searching = false;
+
+(async () => {
+  try {
+    ME = await requirePage(['owner', 'manager', 'staff'], 'dashboard.html');
+  } catch (e) { return; }
+  if (new URLSearchParams(location.search).get('denied')) {
+    showMsg($('pageMsg'), 'You do not have access to that page, so you were brought back to the Dashboard.', 'warn');
+  }
+  try {
+    SETTINGS = await getSettings();
+  } catch (e) { showMsg($('pageMsg'), friendlyError(e), 'error'); return; }
+
+  const canBrief = ME.role === 'owner' || ME.role === 'manager';
+  $('aiCard').classList.toggle('hidden', !canBrief);
+  $('ordersHead').innerHTML = '<th>Order ID</th><th>Date</th><th>Customer</th><th class="num">Amount</th><th>Status</th>' +
+    (ME.role === 'owner' ? '<th></th>' : '');
+
+  DAY = yesterdayISO();
+  $('dayPick').value = DAY;
+  $('dayPick').max = todayISO();
+  $('dayPick').onchange = () => { if ($('dayPick').value) { DAY = $('dayPick').value; loadDay(); } };
+  $('prevDay').onclick = () => { DAY = addDays(DAY, -1); $('dayPick').value = DAY; loadDay(); };
+  $('nextDay').onclick = () => { if (DAY < todayISO()) { DAY = addDays(DAY, 1); $('dayPick').value = DAY; loadDay(); } };
+
+  $('searchForm').onsubmit = e => { e.preventDefault(); runSearch(); };
+  $('clearSearch').onclick = () => { $('searchBox').value = ''; searching = false; $('clearSearch').classList.add('hidden'); renderOrders(DAY_ORDERS, 'Orders on ' + fmtDate(DAY)); };
+
+  setupBrief();
+  setupEdit();
+  await loadAlerts();
+  await loadDay();
+})();
+
+// ---------- Alerts box ----------
+async function loadAlerts() {
+  if (ME.role === 'staff') return;
+  const y = yesterdayISO();
+  const [{ data: ups, error: e1 }, { data: sales, error: e2 }, { data: cancels, error: e3 }] = await Promise.all([
+    sb.from('uploads').select('created_at').eq('order_date', y).order('created_at', { ascending: false }).limit(1),
+    sb.from('daily_sales').select('*').eq('order_date', y).maybeSingle(),
+    sb.from('orders').select('order_id').eq('order_date', y).eq('status', 'Cancelled').order('order_id'),
+  ]);
+  if (e1 || e2 || e3) { showMsg($('pageMsg'), friendlyError(e1 || e2 || e3), 'error'); return; }
+
+  const html = [];
+  const uploaded = ups && ups.length > 0;
+  if (!uploaded) {
+    if (deadlinePassed(SETTINGS.upload_deadline)) {
+      html.push('<div class="alert red"><b>Yesterday\'s orders (' + fmtDate(y) + ') have not been uploaded yet.</b><br>They were due by ' + fmtTime(SETTINGS.upload_deadline) + '.' +
+        (ME.role !== 'staff' ? ' <a href="upload.html">Upload now</a>' : '') + '</div>');
+    } else {
+      html.push('<div class="alert amber">Yesterday\'s orders (' + fmtDate(y) + ') are not uploaded yet. Due by ' + fmtTime(SETTINGS.upload_deadline) + '.</div>');
+    }
+  }
+
+  if (ME.role === 'owner' && sales) {
+    const ids = (cancels || []).map(c => c.order_id);
+    const summary = 'Metatronik daily summary - ' + fmtDate(y) + '\n' +
+      'Total sales: ' + fmtRM(sales.total_rm) + '\n' +
+      'Confirmed orders: ' + sales.confirmed_count + '\n' +
+      'Cancelled orders: ' + sales.cancelled_count + (ids.length ? ' (' + ids.join(', ') + ')' : '');
+    html.push('<div class="alert blue"><b>Yesterday, ' + fmtDate(y) + '</b><br>' +
+      'Total sales: <b>' + fmtRM(sales.total_rm) + '</b> · Confirmed orders: <b>' + sales.confirmed_count + '</b> · Cancelled orders: <b style="color:var(--bad)">' + sales.cancelled_count + '</b>' +
+      (ids.length ? '<br><span style="color:var(--bad)">Cancelled: ' + ids.map(esc).join(', ') + '</span>' : '') +
+      '<div style="margin-top:10px"><a class="btn whatsapp small" target="_blank" rel="noopener" href="' + esc(whatsappLink(SETTINGS.owner_whatsapp, summary)) + '">Send to WhatsApp</a>' +
+      (SETTINGS.owner_whatsapp ? '' : ' <span class="small muted">Tip: add your WhatsApp number in Settings.</span>') + '</div></div>');
+  }
+
+  if (html.length) {
+    $('alerts').innerHTML = html.join('');
+    $('alertsCard').classList.remove('hidden');
+  }
+}
+
+// ---------- One day ----------
+async function loadDay() {
+  $('dayTitle').textContent = fmtDate(DAY);
+  $('daySub').textContent = DAY === yesterdayISO() ? 'Yesterday' : (DAY === todayISO() ? 'Today' : '');
+  $('nextDay').disabled = DAY >= todayISO();
+
+  const from = addDays(DAY, -(SETTINGS.chart_days - 1));
+  const [{ data: orders, error: e1 }, { data: days, error: e2 }, { data: ups, error: e3 }] = await Promise.all([
+    sb.from('orders').select('*').eq('order_date', DAY).order('status').order('order_id'),
+    sb.from('daily_sales').select('*').gte('order_date', addDays(from, -1)).lte('order_date', DAY),
+    sb.from('uploads').select('created_at').eq('order_date', yesterdayISO()).order('created_at', { ascending: false }).limit(1),
+  ]);
+  if (e1 || e2 || e3) { showMsg($('pageMsg'), friendlyError(e1 || e2 || e3), 'error'); return; }
+
+  DAY_ORDERS = orders || [];
+  const byDate = {};
+  (days || []).forEach(d => { byDate[d.order_date] = d; });
+  renderKpis(byDate[DAY], byDate[addDays(DAY, -1)], DAY_ORDERS, ups && ups[0]);
+  if (!searching) renderOrders(DAY_ORDERS, 'Orders on ' + fmtDate(DAY));
+  renderChart(from, byDate);
+  loadSavedBriefs();
+}
+
+function renderKpis(today, before, orders, lastUpload) {
+  const t = today || { total_rm: 0, order_count: 0, confirmed_count: 0, cancelled_count: 0 };
+  const confirmedIds = orders.filter(o => o.status === 'Confirmed').map(o => o.order_id);
+  const cancelledIds = orders.filter(o => o.status === 'Cancelled').map(o => o.order_id);
+  const rate = t.order_count ? (t.cancelled_count / t.order_count * 100) : 0;
+  let compare = 'No data for the day before.';
+  if (before) {
+    const diff = Number(t.total_rm) - Number(before.total_rm);
+    compare = (diff >= 0 ? '▲ ' : '▼ ') + fmtRM(Math.abs(diff)) + ' vs day before';
+  }
+  const listIds = ids => ids.length ? ids.map(esc).join(', ') : 'None';
+  const y = yesterdayISO();
+
+  $('kpis').innerHTML =
+    kpi('Total sales', fmtRM(t.total_rm), esc(compare), 'Compare with the day before. If lower, look at the cancelled list.') +
+    kpi('Confirmed orders', t.confirmed_count, listIds(confirmedIds), 'Check these orders are being packed and delivered.', 'good') +
+    kpi('Cancelled orders', t.cancelled_count, '<span style="color:var(--bad)">' + listIds(cancelledIds) + '</span>', 'Follow up each one today: call the customer and find out why.', t.cancelled_count ? 'bad' : '') +
+    kpi('Cancellation rate', rate.toFixed(1) + '%', t.order_count + ' orders in total', 'If it keeps going up, look for a common cause.') +
+    kpi('Upload of ' + fmtDate(y), lastUpload ? 'Done' : 'Not yet',
+        lastUpload ? 'Uploaded ' + fmtDateTime(lastUpload.created_at) : 'Due by ' + fmtTime(SETTINGS.upload_deadline),
+        lastUpload ? 'Nothing to do.' : 'Remind the Manager to upload the file.', lastUpload ? 'good' : 'bad');
+}
+function kpi(label, value, ids, action, cls) {
+  return '<div class="kpi ' + (cls || '') + '"><div class="label">' + label + '</div><div class="value">' + value + '</div>' +
+    '<div class="ids">' + ids + '</div><div class="action">' + action + '</div></div>';
+}
+
+function renderOrders(rows, title) {
+  $('tableTitle').textContent = title + ' (' + rows.length + ')';
+  const isOwner = ME.role === 'owner';
+  if (!rows.length) {
+    $('ordersBody').innerHTML = '<tr><td colspan="6" class="muted">No orders found.</td></tr>';
+    return;
+  }
+  $('ordersBody').innerHTML = rows.map(o =>
+    '<tr class="' + (o.status === 'Cancelled' ? 'cancelled' : '') + '">' +
+    '<td><b>' + esc(o.order_id) + '</b></td><td>' + fmtDate(o.order_date) + '</td><td>' + esc(o.customer_name) + '</td>' +
+    '<td class="num">' + fmtRM(o.amount_rm) + '</td><td><span class="pill ' + o.status + '">' + o.status + '</span></td>' +
+    (isOwner ? '<td style="white-space:nowrap"><button class="secondary small" data-edit="' + o.id + '">Edit</button> ' +
+      '<button class="danger small" data-del="' + o.id + '">Delete</button></td>' : '') +
+    '</tr>').join('');
+  window._rows = rows;
+}
+
+async function runSearch() {
+  const q = $('searchBox').value.trim();
+  if (!q) return;
+  const { data, error } = await sb.from('orders').select('*').ilike('order_id', '%' + q.replace(/[%_]/g, '') + '%')
+    .order('order_date', { ascending: false }).limit(50);
+  if (error) { showMsg($('pageMsg'), friendlyError(error), 'error'); return; }
+  searching = true;
+  $('clearSearch').classList.remove('hidden');
+  renderOrders(data || [], 'Search results for "' + q + '"');
+}
+
+function renderChart(from, byDate) {
+  const labels = [], values = [];
+  for (let d = from; d <= DAY; d = addDays(d, 1)) {
+    const [, m, dd] = d.split('-').map(Number);
+    labels.push(dd + ' ' + MONTHS[m - 1]);
+    values.push(byDate[d] ? Number(byDate[d].total_rm) : 0);
+  }
+  $('chartTitle').textContent = 'Total sales per day — last ' + SETTINGS.chart_days + ' days';
+  if (chart) chart.destroy();
+  chart = new Chart($('salesChart'), {
+    type: 'bar',
+    data: { labels, datasets: [{ label: 'Total sales', data: values, backgroundColor: '#1f4fd1', borderRadius: 4 }] },
+    options: {
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => fmtRM(c.parsed.y) } } },
+      scales: { y: { beginAtZero: true, ticks: { callback: v => 'RM ' + Number(v).toLocaleString('en-MY') } } },
+    },
+  });
+}
+
+// ---------- Owner: edit and delete ----------
+function setupEdit() {
+  $('ordersBody').onclick = async e => {
+    const editId = e.target.getAttribute('data-edit');
+    const delId = e.target.getAttribute('data-del');
+    if (editId) openEdit((window._rows || []).find(r => String(r.id) === editId));
+    if (delId) {
+      const row = (window._rows || []).find(r => String(r.id) === delId);
+      if (!row || !confirm('Delete order ' + row.order_id + '? This cannot be undone.')) return;
+      const { error } = await sb.from('orders').delete().eq('id', row.id);
+      if (error) { showMsg($('pageMsg'), friendlyError(error), 'error'); return; }
+      showMsg($('pageMsg'), 'Order ' + row.order_id + ' deleted.', 'ok');
+      searching = false; $('clearSearch').classList.add('hidden');
+      loadDay();
+    }
+  };
+  $('editCancel').onclick = () => $('editModal').classList.add('hidden');
+  $('editForm').onsubmit = async e => {
+    e.preventDefault();
+    const upd = {
+      order_date: $('editDate').value,
+      customer_name: $('editCustomer').value.trim(),
+      amount_rm: Math.round(Number($('editAmount').value) * 100) / 100,
+      status: $('editStatus').value,
+    };
+    const { error } = await sb.from('orders').update(upd).eq('id', editing.id);
+    if (error) { showMsg($('editMsg'), friendlyError(error), 'error'); return; }
+    $('editModal').classList.add('hidden');
+    showMsg($('pageMsg'), 'Order ' + editing.order_id + ' saved.', 'ok');
+    searching = false; $('clearSearch').classList.add('hidden');
+    loadDay();
+  };
+}
+function openEdit(row) {
+  if (!row) return;
+  editing = row;
+  $('editId').textContent = row.order_id;
+  $('editDate').value = row.order_date;
+  $('editCustomer').value = row.customer_name;
+  $('editAmount').value = Number(row.amount_rm).toFixed(2);
+  $('editStatus').value = row.status;
+  showMsg($('editMsg'), '');
+  $('editModal').classList.remove('hidden');
+}
+
+// ---------- AI brief ----------
+function setupBrief() {
+  $('makeBrief').onclick = () => {
+    $('briefPrompt').value = buildPrompt();
+    $('briefAnswer').value = '';
+    $('briefChecked').checked = false;
+    $('saveBrief').disabled = true;
+    showMsg($('briefMsg'), '');
+    $('briefArea').classList.remove('hidden');
+  };
+  $('copyPrompt').onclick = async () => {
+    try { await navigator.clipboard.writeText($('briefPrompt').value); showMsg($('briefMsg'), 'Question copied. Now paste it into Claude.', 'ok'); }
+    catch (e) { $('briefPrompt').select(); showMsg($('briefMsg'), 'Please copy the question by hand (Ctrl+C).', 'warn'); }
+  };
+  const check = () => { $('saveBrief').disabled = !($('briefChecked').checked && $('briefAnswer').value.trim()); };
+  $('briefChecked').onchange = check;
+  $('briefAnswer').oninput = check;
+  $('saveBrief').onclick = async () => {
+    const { error } = await sb.from('ai_briefs').insert({
+      for_date: DAY, prompt: $('briefPrompt').value, answer: $('briefAnswer').value.trim(), checked: true,
+    });
+    if (error) { showMsg($('briefMsg'), friendlyError(error), 'error'); return; }
+    showMsg($('briefMsg'), 'Brief saved.', 'ok');
+    $('briefArea').classList.add('hidden');
+    loadSavedBriefs();
+  };
+}
+function buildPrompt() {
+  const rows = DAY_ORDERS;
+  const confirmed = rows.filter(o => o.status === 'Confirmed');
+  const total = confirmed.reduce((s, o) => s + Number(o.amount_rm), 0);
+  return 'You are helping the owner of a small company (Metatronik) review one day of sales.\n' +
+    'Use ONLY the data below. Do not guess or add anything that is not in the data.\n' +
+    'Write in short, simple sentences for a business owner (not technical).\n\n' +
+    'Day: ' + fmtDate(DAY) + '\n' +
+    'Total sales (confirmed orders only): ' + fmtRM(total) + '\n' +
+    'Orders: ' + rows.length + ' (' + confirmed.length + ' confirmed, ' + (rows.length - confirmed.length) + ' cancelled)\n\n' +
+    'Order ID | Customer | Amount | Status\n' +
+    rows.map(o => o.order_id + ' | ' + o.customer_name + ' | ' + fmtRM(o.amount_rm) + ' | ' + o.status).join('\n') +
+    '\n\nPlease give me:\n' +
+    '1. A 2-3 sentence summary of the day.\n' +
+    '2. The list of cancelled orders I should follow up today, biggest amount first.\n' +
+    '3. Anything unusual I should check (for example one customer with many cancellations).';
+}
+async function loadSavedBriefs() {
+  if (ME.role === 'staff') return;
+  const { data, error } = await sb.from('ai_briefs').select('*').eq('for_date', DAY).order('created_at', { ascending: false }).limit(5);
+  if (error) { $('savedBriefs').innerHTML = ''; return; }
+  $('savedBriefs').innerHTML = (data && data.length) ?
+    '<h2 style="margin-top:8px">Saved briefs for ' + fmtDate(DAY) + '</h2>' +
+    data.map(b => '<div class="msg info"><div class="small muted">Saved ' + fmtDateTime(b.created_at) + ' · checked</div>' +
+      '<div style="white-space:pre-wrap">' + esc(b.answer) + '</div></div>').join('') : '';
+}
+</script>
+</body>
+</html>

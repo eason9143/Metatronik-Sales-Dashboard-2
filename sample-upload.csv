@@ -1,0 +1,11 @@
+Order ID,Order Date,Customer,Amount,Status
+ORD-1001,16/11/2026,Tan Ah Kow,245.50,Confirmed
+ORD-1002,16/11/2026,Siti Aminah,180.00,Confirmed
+ORD-1003,16/11/2026,Raj Kumar,520.75,Cancelled
+ORD-1004,16/11/2026,Lim Mei Ling,99.90,Confirmed
+ORD-1005,16/11/2026,Ahmad Faizal,310.00,Confirmed
+ORD-1006,16/11/2026,Wong Kar Wai,75.20,Cancelled
+ORD-1007,16/11/2026,Nurul Huda,640.00,Confirmed
+ORD-1008,16/11/2026,Chong Wei,150.00,Confirmed
+ORD-1009,16/11/2026,Priya Devi,88.80,Confirmed
+ORD-1010,16/11/2026,Hafiz Rahman,410.40,Confirmed

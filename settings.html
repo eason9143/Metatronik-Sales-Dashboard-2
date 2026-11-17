@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Metatronik Sales — Settings</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</head>
+<body>
+<main>
+  <form class="card" id="settingsForm">
+    <h1>Settings</h1>
+    <p class="muted">Only the owner can see and change this page.</p>
+    <div class="row">
+      <div class="field grow">
+        <label for="deadline">Upload deadline (each morning)</label>
+        <input type="time" id="deadline" required>
+      </div>
+      <div class="field grow">
+        <label for="whatsapp">Owner's WhatsApp number (for the summary button)</label>
+        <input id="whatsapp" placeholder="e.g. 60123456789" inputmode="tel">
+      </div>
+      <div class="field grow">
+        <label for="chartDays">Days in the sales chart (7 to 60)</label>
+        <input type="number" id="chartDays" min="7" max="60" required>
+      </div>
+    </div>
+    <button type="submit">Save settings</button>
+    <div id="settingsMsg"></div>
+  </form>
+
+  <div class="card">
+    <h2>People</h2>
+    <p class="small muted">New people start as Staff (view only). Switching someone off stops them seeing anything.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Switched on</th><th></th></tr></thead>
+      <tbody id="people"></tbody>
+    </table></div>
+    <div id="peopleMsg"></div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let ME;
+
+(async () => {
+  try { ME = await requirePage(['owner'], 'settings.html'); } catch (e) { return; }
+  try {
+    const s = await getSettings();
+    $('deadline').value = s.upload_deadline;
+    $('whatsapp').value = s.owner_whatsapp;
+    $('chartDays').value = s.chart_days;
+  } catch (e) { showMsg($('settingsMsg'), friendlyError(e), 'error'); }
+  $('settingsForm').onsubmit = saveSettings;
+  loadPeople();
+})();
+
+async function saveSettings(e) {
+  e.preventDefault();
+  const wa = $('whatsapp').value.replace(/\D/g, '');
+  if (wa && (wa.length < 9 || wa.length > 15)) { showMsg($('settingsMsg'), 'The WhatsApp number looks wrong. Use the country code, e.g. 60123456789.', 'error'); return; }
+  const days = parseInt($('chartDays').value, 10);
+  if (!(days >= 7 && days <= 60)) { showMsg($('settingsMsg'), 'Days in the chart must be between 7 and 60.', 'error'); return; }
+  const rows = [
+    { key: 'upload_deadline', value: $('deadline').value },
+    { key: 'owner_whatsapp', value: wa },
+    { key: 'chart_days', value: String(days) },
+  ];
+  const { error } = await sb.from('settings').upsert(rows, { onConflict: 'key' });
+  if (error) { showMsg($('settingsMsg'), friendlyError(error), 'error'); return; }
+  $('whatsapp').value = wa;
+  showMsg($('settingsMsg'), 'Settings saved.', 'ok');
+}
+
+async function loadPeople() {
+  const { data, error } = await sb.from('profiles').select('*').order('created_at');
+  if (error) { showMsg($('peopleMsg'), friendlyError(error), 'error'); return; }
+  $('people').innerHTML = data.map(p =>
+    '<tr data-id="' + p.id + '"><td>' + esc(p.full_name || '—') + (p.id === ME.id ? ' <span class="small muted">(you)</span>' : '') + '</td>' +
+    '<td>' + esc(p.email) + '</td>' +
+    '<td><select class="role" style="min-width:110px">' +
+      ['owner', 'manager', 'staff'].map(r => '<option value="' + r + '"' + (p.role === r ? ' selected' : '') + '>' + { owner: 'Owner', manager: 'Manager', staff: 'Staff' }[r] + '</option>').join('') +
+    '</select></td>' +
+    '<td><input type="checkbox" class="active"' + (p.active ? ' checked' : '') + '></td>' +
+    '<td><button class="small save">Save</button></td></tr>').join('');
+}
+
+$('people').onclick = async e => {
+  if (!e.target.classList.contains('save')) return;
+  const tr = e.target.closest('tr');
+  const upd = { role: tr.querySelector('.role').value, active: tr.querySelector('.active').checked };
+  const { error } = await sb.from('profiles').update(upd).eq('id', tr.dataset.id);
+  if (error) { showMsg($('peopleMsg'), friendlyError(error), 'error'); loadPeople(); return; }
+  showMsg($('peopleMsg'), 'Saved.', 'ok');
+  if (tr.dataset.id === ME.id && (upd.role !== 'owner' || !upd.active)) { window.location.replace('index.html'); return; }
+  loadPeople();
+};
+</script>
+</body>
+</html>

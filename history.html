@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Metatronik Sales — History</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</head>
+<body>
+<main>
+  <div class="card">
+    <div class="row">
+      <div class="grow">
+        <h1>History</h1>
+        <p class="muted" style="margin:0">Who did what, and when. The latest 300 entries.</p>
+      </div>
+      <div>
+        <label for="filter">Show</label>
+        <select id="filter">
+          <option value="">Everything</option>
+          <option value="upload">File uploads</option>
+          <option value="status_change">Status changes</option>
+          <option value="create">New orders</option>
+          <option value="edit">Order edits</option>
+          <option value="delete">Deleted orders</option>
+          <option value="role_change">Role changes</option>
+          <option value="sign_up">New accounts</option>
+          <option value="setting_change">Settings changes</option>
+        </select>
+      </div>
+    </div>
+    <div id="msg"></div>
+  </div>
+  <div class="card">
+    <div class="table-wrap"><table>
+      <thead><tr><th>When</th><th>Who</th><th>What</th><th>Which</th><th>Details</th></tr></thead>
+      <tbody id="body"></tbody>
+    </table></div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const LABEL = {
+  upload: 'Uploaded file', status_change: 'Status changed', create: 'New order', edit: 'Order edited',
+  delete: 'Order deleted', role_change: 'Role changed', sign_up: 'New account', setting_change: 'Setting changed',
+};
+const ROLE = { owner: 'Owner', manager: 'Manager', staff: 'Staff' };
+
+(async () => {
+  try { await requirePage(['owner', 'manager'], 'history.html'); } catch (e) { return; }
+  $('filter').onchange = load;
+  load();
+})();
+
+function describe(a) {
+  const d = a.details || {};
+  switch (a.action) {
+    case 'upload': return fmtDate(d.order_date) + ': ' + d.orders + ' orders, ' + d.cancelled + ' cancelled, ' + fmtRM(d.total_rm);
+    case 'status_change': return d.old_status + ' → <b style="color:' + (d.new_status === 'Cancelled' ? 'var(--bad)' : 'var(--good)') + '">' + d.new_status + '</b>';
+    case 'create': return fmtDate(d.order_date) + ', ' + fmtRM(d.amount_rm) + ', ' + d.status;
+    case 'edit': return (d.old_amount_rm !== d.new_amount_rm ? fmtRM(d.old_amount_rm) + ' → ' + fmtRM(d.new_amount_rm) + ' ' : '') +
+      (d.old_customer !== d.new_customer ? esc(d.old_customer) + ' → ' + esc(d.new_customer) + ' ' : '') +
+      (d.old_date !== d.new_date ? fmtDate(d.old_date) + ' → ' + fmtDate(d.new_date) : '');
+    case 'delete': return fmtRM(d.amount_rm) + ', ' + d.status;
+    case 'role_change': return (ROLE[d.old_role] || d.old_role) + ' → ' + (ROLE[d.new_role] || d.new_role) +
+      (d.old_active !== d.new_active ? (d.new_active ? ' · switched on' : ' · switched off') : '');
+    case 'sign_up': return 'Started as ' + (ROLE[d.role] || d.role);
+    case 'setting_change': return '"' + esc(d.old_value) + '" → "' + esc(d.new_value) + '"';
+    default: return esc(JSON.stringify(d));
+  }
+}
+
+async function load() {
+  let q = sb.from('audit_log').select('*').order('created_at', { ascending: false }).limit(300);
+  if ($('filter').value) q = q.eq('action', $('filter').value);
+  const { data, error } = await q;
+  if (error) { showMsg($('msg'), friendlyError(error), 'error'); return; }
+  $('body').innerHTML = (data && data.length) ? data.map(a =>
+    '<tr><td style="white-space:nowrap">' + fmtDateTime(a.created_at) + '</td><td>' + esc(a.who_email) + '</td>' +
+    '<td>' + (LABEL[a.action] || esc(a.action)) + '</td><td><b>' + esc(a.record_id) + '</b></td><td>' + describe(a) + '</td></tr>').join('')
+    : '<tr><td colspan="5" class="muted">Nothing here yet.</td></tr>';
+}
+</script>
+</body>
+</html>

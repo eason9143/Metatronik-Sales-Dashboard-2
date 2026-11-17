@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Metatronik Sales — Upload file</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Upload the daily orders file</h1>
+    <p class="muted">Download yesterday's Excel file from Google Drive, then choose it here. Please upload by <b id="deadline">8:00 am</b>.</p>
+    <p class="small muted">The file needs these 5 columns: <b>Order ID</b> · <b>Order Date</b> · <b>Customer</b> · <b>Amount</b> · <b>Status</b> (Confirmed or Cancelled).
+      <a href="sample-upload.csv" download>Download an example file</a></p>
+    <div class="field" style="max-width:420px">
+      <label for="fileInput">Choose file (Excel or CSV)</label>
+      <input type="file" id="fileInput" accept=".xlsx,.xls,.csv">
+    </div>
+    <div id="msg"></div>
+  </div>
+
+  <div class="card hidden" id="previewCard">
+    <h2>Check before saving</h2>
+    <div class="kpis" id="previewKpis"></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Row</th><th>Order ID</th><th>Date</th><th>Customer</th><th class="num">Amount</th><th>Status</th></tr></thead>
+      <tbody id="previewBody"></tbody>
+    </table></div>
+    <p class="small muted" id="previewMore"></p>
+    <div class="row">
+      <button id="confirmBtn">Confirm and save</button>
+      <button class="secondary" id="cancelBtn">Cancel</button>
+    </div>
+    <div id="saveMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2>Recent uploads</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>When</th><th>File</th><th>Orders date</th><th class="num">Orders</th><th class="num">Cancelled</th><th class="num">Total sales</th></tr></thead>
+      <tbody id="uploadsBody"></tbody>
+    </table></div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let ROWS = [], FILE_NAME = '';
+
+(async () => {
+  try { await requirePage(['owner', 'manager'], 'upload.html'); } catch (e) { return; }
+  try { const s = await getSettings(); $('deadline').textContent = fmtTime(s.upload_deadline); } catch (e) { /* keep default */ }
+  $('fileInput').onchange = readFile;
+  $('cancelBtn').onclick = resetAll;
+  $('confirmBtn').onclick = save;
+  loadUploads();
+})();
+
+function resetAll() {
+  ROWS = []; FILE_NAME = '';
+  $('fileInput').value = '';
+  $('previewCard').classList.add('hidden');
+  showMsg($('msg'), ''); showMsg($('saveMsg'), '');
+}
+
+// ---------- Reading the file ----------
+const norm = s => String(s == null ? '' : s).toLowerCase().replace(/[^a-z]/g, '');
+const COLS = {
+  order_id: ['orderid', 'orderno', 'ordernumber', 'id'],
+  order_date: ['orderdate', 'date'],
+  customer_name: ['customer', 'customername', 'name'],
+  amount_rm: ['amount', 'amountrm', 'total', 'totalrm'],
+  status: ['status', 'orderstatus'],
+};
+const MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+
+function validYMD(y, m, d) {
+  if (y < 100) y += 2000;
+  const t = new Date(y, m - 1, d);
+  if (t.getFullYear() !== y || t.getMonth() !== m - 1 || t.getDate() !== d) return null;
+  return y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+}
+function parseDate(v) {
+  if (v === '' || v == null) return null;
+  if (typeof v === 'number') {
+    const p = XLSX.SSF.parse_date_code(v);
+    return p ? validYMD(p.y, p.m, p.d) : null;
+  }
+  const s = String(v).trim();
+  let m;
+  if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) return validYMD(+m[1], +m[2], +m[3]);
+  if ((m = s.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})$/))) return validYMD(+m[3], +m[2], +m[1]); // day/month/year
+  if ((m = s.match(/^(\d{1,2})[\s\-]+([A-Za-z]{3})[A-Za-z]*[\s\-,]+(\d{4})$/)) && MON[m[2].toLowerCase()]) return validYMD(+m[3], MON[m[2].toLowerCase()], +m[1]);
+  return null;
+}
+function parseAmount(v) {
+  if (typeof v === 'number') return Math.round(v * 100) / 100;
+  const s = String(v == null ? '' : v).replace(/rm/i, '').replace(/[,\s]/g, '');
+  if (s === '' || isNaN(Number(s))) return null;
+  return Math.round(Number(s) * 100) / 100;
+}
+function parseStatus(v) {
+  const s = norm(v);
+  if (s === 'confirmed' || s === 'confirm') return 'Confirmed';
+  if (s === 'cancelled' || s === 'canceled' || s === 'cancel') return 'Cancelled';
+  return null;
+}
+
+async function readFile() {
+  showMsg($('msg'), ''); showMsg($('saveMsg'), '');
+  $('previewCard').classList.add('hidden');
+  const file = $('fileInput').files[0];
+  if (!file) return;
+  FILE_NAME = file.name;
+  try {
+    const buf = await file.arrayBuffer();
+    const isText = /\.csv$/i.test(file.name);
+    const wb = XLSX.read(buf, { type: 'array', raw: isText });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const grid = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+
+    // Find the heading row (the first row that has an "Order ID" column).
+    let headRow = grid.findIndex(r => r.some(c => COLS.order_id.slice(0, 3).includes(norm(c))));
+    if (headRow < 0) throw new Error('Could not find the "Order ID" heading. Please check the file has the 5 columns: Order ID, Order Date, Customer, Amount, Status.');
+    const heads = grid[headRow].map(norm);
+    const idx = {};
+    const missing = [];
+    for (const key in COLS) {
+      idx[key] = heads.findIndex(h => COLS[key].includes(h));
+      if (idx[key] < 0 && key !== 'customer_name') missing.push({ order_id: 'Order ID', order_date: 'Order Date', amount_rm: 'Amount', status: 'Status' }[key]);
+    }
+    if (missing.length) throw new Error('The file is missing these columns: ' + missing.join(', ') + '.');
+
+    const rows = [], errors = [], seen = {};
+    for (let i = headRow + 1; i < grid.length; i++) {
+      const r = grid[i];
+      if (!r || r.every(c => String(c).trim() === '')) continue;
+      const rowNo = i + 1; // row number as seen in Excel
+      const order_id = String(r[idx.order_id]).trim();
+      const order_date = parseDate(r[idx.order_date]);
+      const amount_rm = parseAmount(r[idx.amount_rm]);
+      const status = parseStatus(r[idx.status]);
+      const customer_name = idx.customer_name >= 0 ? String(r[idx.customer_name]).trim() : '';
+      if (!order_id) errors.push('Row ' + rowNo + ': Order ID is empty.');
+      else if (seen[order_id]) errors.push('Row ' + rowNo + ': Order ID ' + order_id + ' appears twice (also row ' + seen[order_id] + ').');
+      if (!order_date) errors.push('Row ' + rowNo + ': Order Date "' + r[idx.order_date] + '" is not a date I understand. Use a date like 16/11/2026.');
+      if (amount_rm == null || amount_rm < 0) errors.push('Row ' + rowNo + ': Amount "' + r[idx.amount_rm] + '" is not a valid number.');
+      if (!status) errors.push('Row ' + rowNo + ': Status "' + r[idx.status] + '" must be Confirmed or Cancelled.');
+      if (order_id) seen[order_id] = seen[order_id] || rowNo;
+      rows.push({ row: rowNo, order_id, order_date, customer_name, amount_rm, status });
+    }
+    if (!rows.length) throw new Error('The file has no orders in it.');
+    if (errors.length) {
+      $('msg').innerHTML = '<div class="msg error"><b>Nothing was saved. Please fix these rows in the file and choose it again:</b><br>' +
+        errors.slice(0, 20).map(esc).join('<br>') + (errors.length > 20 ? '<br>…and ' + (errors.length - 20) + ' more.' : '') + '</div>';
+      return;
+    }
+    ROWS = rows;
+    showPreview();
+  } catch (e) {
+    showMsg($('msg'), e.message || 'Could not read this file. Please check it is an Excel or CSV file.', 'error');
+  }
+}
+
+function showPreview() {
+  const conf = ROWS.filter(r => r.status === 'Confirmed');
+  const canc = ROWS.filter(r => r.status === 'Cancelled');
+  const total = conf.reduce((s, r) => s + r.amount_rm, 0);
+  const dates = [...new Set(ROWS.map(r => r.order_date))].sort();
+  $('previewKpis').innerHTML =
+    '<div class="kpi"><div class="label">File</div><div class="value" style="font-size:1rem">' + esc(FILE_NAME) + '</div><div class="ids">' + dates.map(fmtDate).join(', ') + '</div></div>' +
+    '<div class="kpi"><div class="label">Orders</div><div class="value">' + ROWS.length + '</div></div>' +
+    '<div class="kpi good"><div class="label">Confirmed</div><div class="value">' + conf.length + '</div></div>' +
+    '<div class="kpi ' + (canc.length ? 'bad' : '') + '"><div class="label">Cancelled</div><div class="value">' + canc.length + '</div></div>' +
+    '<div class="kpi"><div class="label">Total sales</div><div class="value">' + fmtRM(total) + '</div></div>';
+  const show = ROWS.slice(0, 30);
+  $('previewBody').innerHTML = show.map(r =>
+    '<tr class="' + (r.status === 'Cancelled' ? 'cancelled' : '') + '"><td>' + r.row + '</td><td><b>' + esc(r.order_id) + '</b></td><td>' + fmtDate(r.order_date) +
+    '</td><td>' + esc(r.customer_name) + '</td><td class="num">' + fmtRM(r.amount_rm) + '</td><td><span class="pill ' + r.status + '">' + r.status + '</span></td></tr>').join('');
+  $('previewMore').textContent = ROWS.length > 30 ? 'Showing the first 30 of ' + ROWS.length + ' orders.' : '';
+  if (dates.length > 1) showMsg($('msg'), 'Note: this file has orders from ' + dates.length + ' different days.', 'warn');
+  $('previewCard').classList.remove('hidden');
+  $('confirmBtn').disabled = false;
+}
+
+async function save() {
+  $('confirmBtn').disabled = true;
+  showMsg($('saveMsg'), 'Saving…', 'info');
+  const { data, error } = await sb.rpc('import_orders', { p_file_name: FILE_NAME, p_rows: ROWS });
+  if (error) {
+    showMsg($('saveMsg'), 'Nothing was saved. ' + friendlyError(error), 'error');
+    $('confirmBtn').disabled = false;
+    return;
+  }
+  $('previewCard').classList.add('hidden');
+  $('fileInput').value = '';
+  $('msg').innerHTML = '<div class="msg ok"><b>Saved.</b> ' + data.new + ' new orders, ' + data.changed + ' updated, ' + data.unchanged + ' unchanged. ' +
+    '<a href="dashboard.html">Go to the Dashboard</a></div>';
+  ROWS = [];
+  loadUploads();
+}
+
+async function loadUploads() {
+  const { data, error } = await sb.from('uploads').select('*').order('created_at', { ascending: false }).limit(10);
+  if (error) { $('uploadsBody').innerHTML = '<tr><td colspan="6">' + esc(friendlyError(error)) + '</td></tr>'; return; }
+  $('uploadsBody').innerHTML = (data && data.length) ? data.map(u =>
+    '<tr><td>' + fmtDateTime(u.created_at) + '</td><td>' + esc(u.file_name) + '</td><td>' + fmtDate(u.order_date) + '</td>' +
+    '<td class="num">' + u.order_count + '</td><td class="num" style="color:var(--bad)">' + u.cancelled_count + '</td><td class="num">' + fmtRM(u.total_rm) + '</td></tr>').join('')
+    : '<tr><td colspan="6" class="muted">No uploads yet.</td></tr>';
+}
+</script>
+</body>
+</html>
